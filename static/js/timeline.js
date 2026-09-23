@@ -55,7 +55,7 @@ function rulerHTML(laneW) {
     html += `<div class="tick major" style="left:${x}px"></div><span class="lbl" style="left:${x}px">${label}</span>`;
   }
   const minorBg = minor * pps >= 6
-    ? `background-image:repeating-linear-gradient(to right,#3a404b 0 1px,transparent 1px ${minor * pps}px);background-size:100% 6px;background-repeat:no-repeat;background-position:0 100%;`
+    ? `background-image:repeating-linear-gradient(to right,#3c4149 0 1px,transparent 1px ${minor * pps}px);background-size:100% 6px;background-repeat:no-repeat;background-position:0 100%;`
     : '';
   return `<div class="tl-row ruler"><div class="tl-head">${fmtShort(state.time)}</div>
     <div class="tl-lane ruler-lane" data-ruler="1" style="width:${laneW}px;${minorBg}">${html}</div></div>`;

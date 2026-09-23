@@ -11,20 +11,20 @@ const BASE = {
   mode: 'block', font: 'Inter', weight: 700, size: 1, color: '#FFFFFF', accent: '#FFE600',
   highlight: 'none', stroke: 0, strokeColor: '#000000', box: 'none', boxColor: '#000000', boxOpacity: 0.6,
   anim: 'fade', wordPop: false, uppercase: false, lowercase: false, italic: false, rotate: 0,
-  shadow: 0.4, glow: 0, maxWords: 5, y: 0.8,
+  shadow: 0.4, glow: 0, maxWords: 5, position: 'bottom', offset: 0,
 };
 
 const DEFS = {
-  karaoke:    { label: 'Karaoke', font: 'Montserrat', weight: 900, size: 1.15, accent: '#FFE600', highlight: 'color', stroke: 0.18, anim: 'pop', wordPop: true, uppercase: true, maxWords: 3, y: 0.72, shadow: 0.5 },
-  boxed:      { label: 'Highlight box', font: 'Poppins', weight: 800, size: 1.05, accent: '#7C3AED', highlight: 'box', anim: 'pop', wordPop: true, maxWords: 4, y: 0.74, shadow: 0.6 },
-  oneword:    { label: 'One word', mode: 'word', font: 'Anton', weight: 400, size: 2.1, accent: '#FFE600', highlight: 'cycle', stroke: 0.1, anim: 'pop', uppercase: true, maxWords: 4, y: 0.55, shadow: 0.6 },
-  classic:    { label: 'Classic', font: 'Inter', weight: 600, size: 0.9, box: 'full', boxOpacity: 0.62, anim: 'fade', maxWords: 8, y: 0.86, shadow: 0 },
-  bubble:     { label: 'Bubble', font: 'Poppins', weight: 700, size: 0.95, color: '#111111', accent: '#111111', box: 'line', boxColor: '#FFFFFF', boxOpacity: 1, anim: 'pop', maxWords: 6, y: 0.8, shadow: 0 },
-  neon:       { label: 'Neon', font: 'Poppins', weight: 700, size: 1.05, color: '#5EEBFF', accent: '#FF4FD8', highlight: 'color', glow: 1, anim: 'fade', maxWords: 5, y: 0.8, shadow: 0 },
-  comic:      { label: 'Comic', font: 'Bangers', weight: 400, size: 1.4, color: '#FFD60A', accent: '#FFFFFF', highlight: 'color', stroke: 0.16, anim: 'pop', wordPop: true, rotate: -3, uppercase: true, maxWords: 3, y: 0.74, shadow: 0.7 },
-  typewriter: { label: 'Typewriter', mode: 'reveal', font: 'Space Mono', weight: 700, size: 0.85, box: 'full', boxColor: '#111111', boxOpacity: 0.85, anim: 'none', maxWords: 8, y: 0.85, shadow: 0 },
-  minimal:    { label: 'Minimal', font: 'Inter', weight: 500, size: 0.85, highlight: 'dim', anim: 'slide', lowercase: true, maxWords: 6, y: 0.88, shadow: 0.7 },
-  marker:     { label: 'Marker', font: 'Permanent Marker', weight: 400, size: 1.1, color: '#FFFFFF', accent: '#FF5C7A', highlight: 'color', stroke: 0.12, anim: 'pop', wordPop: true, maxWords: 4, y: 0.75, shadow: 0.5, rotate: 2 },
+  karaoke:    { label: 'Karaoke', font: 'Montserrat', weight: 900, size: 1.15, accent: '#FFE600', highlight: 'color', stroke: 0.18, anim: 'pop', wordPop: true, uppercase: true, maxWords: 3, shadow: 0.5 },
+  boxed:      { label: 'Highlight box', font: 'Poppins', weight: 800, size: 1.05, accent: '#7C3AED', highlight: 'box', anim: 'pop', wordPop: true, maxWords: 4, shadow: 0.6 },
+  oneword:    { label: 'One word', mode: 'word', font: 'Anton', weight: 400, size: 2.1, accent: '#FFE600', highlight: 'cycle', stroke: 0.1, anim: 'pop', uppercase: true, maxWords: 4, position: 'middle', shadow: 0.6 },
+  classic:    { label: 'Classic', font: 'Inter', weight: 600, size: 0.9, box: 'full', boxOpacity: 0.62, anim: 'fade', maxWords: 8, shadow: 0 },
+  bubble:     { label: 'Bubble', font: 'Poppins', weight: 700, size: 0.95, color: '#111111', accent: '#111111', box: 'line', boxColor: '#FFFFFF', boxOpacity: 1, anim: 'pop', maxWords: 6, shadow: 0 },
+  neon:       { label: 'Neon', font: 'Poppins', weight: 700, size: 1.05, color: '#5EEBFF', accent: '#FF4FD8', highlight: 'color', glow: 1, anim: 'fade', maxWords: 5, shadow: 0 },
+  comic:      { label: 'Comic', font: 'Bangers', weight: 400, size: 1.4, color: '#FFD60A', accent: '#FFFFFF', highlight: 'color', stroke: 0.16, anim: 'pop', wordPop: true, rotate: -3, uppercase: true, maxWords: 3, shadow: 0.7 },
+  typewriter: { label: 'Typewriter', mode: 'reveal', font: 'Space Mono', weight: 700, size: 0.85, box: 'full', boxColor: '#111111', boxOpacity: 0.85, anim: 'none', maxWords: 8, shadow: 0 },
+  minimal:    { label: 'Minimal', font: 'Inter', weight: 500, size: 0.85, highlight: 'dim', anim: 'slide', lowercase: true, maxWords: 6, shadow: 0.7 },
+  marker:     { label: 'Marker', font: 'Permanent Marker', weight: 400, size: 1.1, color: '#FFFFFF', accent: '#FF5C7A', highlight: 'color', stroke: 0.12, anim: 'pop', wordPop: true, maxWords: 4, shadow: 0.5, rotate: 2 },
 };
 
 export const PRESETS = Object.fromEntries(Object.entries(DEFS).map(([key, d]) => {
@@ -100,24 +100,23 @@ export function drawCaptions(ctx, W, H, tracks, t) {
 }
 
 /**
- * Per-format layout rules. Portrait (TikTok/Reels/Shorts) gets bigger text sized off the
- * width, a narrower line and a raised position that clears the platform UI at the bottom;
- * landscape gets classic subtitle proportions sized off the height.
+ * Per-format text sizing. Portrait (TikTok/Reels/Shorts) gets bigger text sized off the
+ * width; landscape gets classic subtitle proportions sized off the height.
  */
 const FORMATS = {
-  portrait:  { font: 0.074, ref: 'W', width: 0.84, yScale: 0.72, maxLines: 3 },
-  square:    { font: 0.064, ref: 'W', width: 0.84, yScale: 0.88, maxLines: 3 },
-  landscape: { font: 0.054, ref: 'H', width: 0.72, yScale: 1.00, maxLines: 2 },
+  portrait:  { font: 0.074, ref: 'W', maxLines: 3 },
+  square:    { font: 0.064, ref: 'W', maxLines: 3 },
+  landscape: { font: 0.054, ref: 'H', maxLines: 2 },
 };
 export function formatOf(W, H) {
   const ar = W / H;
   return ar < 0.8 ? 'portrait' : ar > 1.25 ? 'landscape' : 'square';
 }
-/** Vertical centre (0..1). Auto mode maps the preset's position into the format's safe zone. */
-export function effectiveY(S, W, H) {
-  if (S.autoPos === false) return S.y;
-  return 0.5 + (S.y - 0.5) * FORMATS[formatOf(W, H)].yScale;
-}
+
+// Placement: text spans 84% of the width; the block's top edge sits at 9% (top), its
+// bottom edge at 91% (bottom), or it is centred (middle), never closer than 4% to an edge.
+export const POSITIONS = ['top', 'middle', 'bottom'];
+const LINE_WIDTH = 0.84, EDGE = 0.09, SAFE = 0.04;
 
 function layoutLines(ctx, S, words, px, maxW) {
   ctx.font = fontString(S, px);
@@ -144,7 +143,7 @@ export function drawSegment(ctx, W, H, seg, S, t) {
 
   // Layout: wrap within the format's line width; shrink if a word is too wide
   // or the caption needs more lines than the format allows.
-  const maxW = W * F.width;
+  const maxW = W * LINE_WIDTH;
   let px = (F.ref === 'W' ? W : H) * F.font * S.size;
   let L = layoutLines(ctx, S, words, px, maxW);
   for (let k = 0; k < 6 && (L.widest > maxW || (S.mode !== 'word' && L.lines.length > F.maxLines)); k++) {
@@ -157,8 +156,12 @@ export function drawSegment(ctx, W, H, seg, S, t) {
   const blockH = lines.length * lh;
   const blockW = Math.max(...lines.map(l => l.w));
   const pad = px * 0.32;
-  let cy = H * effectiveY(S, W, H);
-  cy = Math.max(blockH / 2 + pad + H * 0.03, Math.min(H - blockH / 2 - pad - H * 0.03, cy));
+  let blockTop = S.position === 'top' ? H * EDGE
+    : S.position === 'middle' ? (H - blockH) / 2
+    : H * (1 - EDGE) - blockH;
+  blockTop += (S.offset || 0) * H;
+  blockTop = Math.max(H * SAFE + pad, Math.min(H - blockH - H * SAFE - pad, blockTop));
+  const cy = blockTop + blockH / 2;
   const cx = W / 2;
 
   // Entrance animation (per segment, or per word in "word" mode).
