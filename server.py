@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = Path(os.getenv("TINYCUT_DATA", BASE / "data"))
 MEDIA_DIR = DATA / "media"
 EXPORT_DIR = DATA / "exports"
 WORK_DIR = DATA / "work"

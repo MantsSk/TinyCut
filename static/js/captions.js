@@ -99,25 +99,30 @@ export function drawCaptions(ctx, W, H, tracks, t) {
   return sig;
 }
 
-export function drawSegment(ctx, W, H, seg, S, t) {
-  const base = Math.min(W, H) * 0.058 * S.size;
-  const ai = activeIndex(seg.words, t);
-  const aiC = Math.max(ai, 0);
-  let words = seg.words.map((w, i) => ({ ...w, i, text: transformText(S, w.text) }));
-  let px = base;
-  if (S.mode === 'word') words = [words[aiC]];
+/**
+ * Per-format layout rules. Portrait (TikTok/Reels/Shorts) gets bigger text sized off the
+ * width, a narrower line and a raised position that clears the platform UI at the bottom;
+ * landscape gets classic subtitle proportions sized off the height.
+ */
+const FORMATS = {
+  portrait:  { font: 0.074, ref: 'W', width: 0.84, yScale: 0.72, maxLines: 3 },
+  square:    { font: 0.064, ref: 'W', width: 0.84, yScale: 0.88, maxLines: 3 },
+  landscape: { font: 0.054, ref: 'H', width: 0.72, yScale: 1.00, maxLines: 2 },
+};
+export function formatOf(W, H) {
+  const ar = W / H;
+  return ar < 0.8 ? 'portrait' : ar > 1.25 ? 'landscape' : 'square';
+}
+/** Vertical centre (0..1). Auto mode maps the preset's position into the format's safe zone. */
+export function effectiveY(S, W, H) {
+  if (S.autoPos === false) return S.y;
+  return 0.5 + (S.y - 0.5) * FORMATS[formatOf(W, H)].yScale;
+}
 
-  // Layout: wrap into lines within maxW.
-  const maxW = W * 0.86;
+function layoutLines(ctx, S, words, px, maxW) {
   ctx.font = fontString(S, px);
-  let space = ctx.measureText(' ').width;
-  let widths = words.map(w => ctx.measureText(w.text).width);
-  if (S.mode === 'word' && widths[0] > maxW) {
-    px *= maxW / widths[0];
-    ctx.font = fontString(S, px);
-    widths = [maxW];
-    space = ctx.measureText(' ').width;
-  }
+  const space = ctx.measureText(' ').width;
+  const widths = words.map(w => ctx.measureText(w.text).width);
   const lines = [];
   let cur = [], curW = 0;
   words.forEach((w, k) => {
@@ -127,12 +132,32 @@ export function drawSegment(ctx, W, H, seg, S, t) {
     curW += (cur.length > 1 ? space : 0) + widths[k];
   });
   if (cur.length) lines.push({ items: cur, w: curW });
+  return { lines, space, widest: Math.max(...widths) };
+}
+
+export function drawSegment(ctx, W, H, seg, S, t) {
+  const F = FORMATS[formatOf(W, H)];
+  const ai = activeIndex(seg.words, t);
+  const aiC = Math.max(ai, 0);
+  let words = seg.words.map((w, i) => ({ ...w, i, text: transformText(S, w.text) }));
+  if (S.mode === 'word') words = [words[aiC]];
+
+  // Layout: wrap within the format's line width; shrink if a word is too wide
+  // or the caption needs more lines than the format allows.
+  const maxW = W * F.width;
+  let px = (F.ref === 'W' ? W : H) * F.font * S.size;
+  let L = layoutLines(ctx, S, words, px, maxW);
+  for (let k = 0; k < 6 && (L.widest > maxW || (S.mode !== 'word' && L.lines.length > F.maxLines)); k++) {
+    px *= L.widest > maxW ? Math.max(0.5, maxW / L.widest) : 0.88;
+    L = layoutLines(ctx, S, words, px, maxW);
+  }
+  const { lines, space } = L;
 
   const lh = px * 1.22;
   const blockH = lines.length * lh;
   const blockW = Math.max(...lines.map(l => l.w));
   const pad = px * 0.32;
-  let cy = H * S.y;
+  let cy = H * effectiveY(S, W, H);
   cy = Math.max(blockH / 2 + pad + H * 0.03, Math.min(H - blockH / 2 - pad - H * 0.03, cy));
   const cx = W / 2;
 

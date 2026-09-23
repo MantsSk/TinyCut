@@ -4,7 +4,7 @@ import {
   currentCaptionTrack, newCaptionTrack, applyPreset, regroup, setSegText, addTextCaption, timelineWords,
   splitAt, deleteSelection, projectDuration, extractAudio, addAudioAt,
 } from './store.js';
-import { PRESETS, FONTS, resolveStyle, drawSegment, groupWords, toSRT } from './captions.js';
+import { PRESETS, FONTS, resolveStyle, drawSegment, groupWords, toSRT, effectiveY, formatOf } from './captions.js';
 import { seek, play, pause } from './preview.js';
 import { $, $$, esc, fmtTime, fmtShort, toast } from './util.js';
 
@@ -317,6 +317,8 @@ function clipInspector(el, { clip, track }) {
 
 function captionInspector(el, ct, seg) {
   const S = resolveStyle(ct.style);
+  const { width: PW, height: PH } = state.project.settings;
+  const fmtName = { portrait: 'vertical 9:16', square: 'square / 4:5', landscape: 'wide 16:9' }[formatOf(PW, PH)];
   const opts = (list, cur) => list.map(([v, n]) => `<option value="${v}"${v === cur ? ' selected' : ''}>${n}</option>`).join('');
   const t = state.time;
   el.innerHTML = `
@@ -332,7 +334,9 @@ function captionInspector(el, ct, seg) {
     <div class="row"><label>Preset</label><select data-k="preset">${opts(Object.entries(PRESETS).map(([k, p]) => [k, p.label]), S.preset)}</select></div>
     <div class="row"><label>Font</label><select data-k="font">${opts(FONTS.map(f => [f, f]), S.font)}</select></div>
     ${slider('Size', 'size', 0.4, 3, 0.05, S.size)}
-    ${slider('Position', 'y', 0.05, 0.95, 0.01, S.y, v => `${Math.round(v * 100)}%`)}
+    ${slider('Position', 'y', 0.05, 0.95, 0.01, effectiveY(S, PW, PH), v => `${Math.round(v * 100)}%`)}
+    <div class="row"><label>Auto position</label><input type="checkbox" data-k="autoPos"${S.autoPos !== false ? ' checked' : ''}>
+      <span class="note" style="margin:0">${S.autoPos !== false ? `fitted for ${fmtName}` : 'fixed — tick to fit the format again'}</span></div>
     <div class="row"><label>Text / accent</label><input type="color" data-k="color" value="${S.color}"><input type="color" data-k="accent" value="${S.accent}"></div>
     <div class="row"><label>Display</label><select data-k="mode">${opts([['block', 'Whole caption'], ['word', 'One word at a time'], ['reveal', 'Word-by-word reveal']], S.mode)}</select></div>
     <div class="row"><label>Highlight</label><select data-k="highlight">${opts([['none', 'None'], ['color', 'Active word color'], ['box', 'Active word box'], ['dim', 'Dim others'], ['cycle', 'Cycle colors']], S.highlight)}</select></div>
@@ -353,7 +357,14 @@ function captionInspector(el, ct, seg) {
 
   bindInputs(el, (k, v, final) => {
     if (k === 'preset') { if (final) applyPreset(ct, v); return; }
+    if (k === 'autoPos') {
+      // Back to auto: restore the preset's base position so it maps into the safe zone again.
+      ct.style.autoPos = v;
+      if (v) ct.style.y = PRESETS[ct.style.preset].y;
+      return;
+    }
     ct.style[k] = v;
+    if (k === 'y') ct.style.autoPos = false;
     if (k === 'maxWords' && final) regroup(ct);
     if (k === 'uppercase' && v) ct.style.lowercase = false;
   });
