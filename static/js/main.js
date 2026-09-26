@@ -1,11 +1,14 @@
 import {
   state, on, emit, commit, undo, redo, canUndo, canRedo, resetHistory, defaultProject, projectDuration,
-  splitAt, deleteSelection, addTextCaption, newTrack, validateSel,
+  splitAt, deleteSelection, addTextCaption, newTrack, validateSel, selectAll,
 } from './store.js';
-import { initPreview, onFrame, togglePlay, seek, pause } from './preview.js';
+import { createProject, showProjects } from './projects.js';
+import { initPreview, onFrame, togglePlay, seek, pause, refreshPlayback, warmPreviews } from './preview.js';
+import { loadProjectAudio } from './audio.js';
 import { initTimeline, renderTimeline, updatePlayhead, setZoom, zoomToFit, setFileDropHandler, cancelDrag, isDragging } from './timeline.js';
 import { renderMediaTab, renderCaptionsTab, renderInspector, uploadFiles } from './panels.js';
 import { exportVideo } from './export.js';
+import { FONTS } from './captions.js';
 import { $, $$, fmtTime, toast } from './util.js';
 
 // Zoom slider is logarithmic: 0 → 2 px/s, 100 → 500 px/s.
@@ -13,15 +16,16 @@ const ppsToSlider = pps => Math.round(100 * Math.log(pps / 2) / Math.log(250));
 const sliderToPps = v => 2 * Math.pow(250, v / 100);
 
 async function boot() {
-  const [media, project] = await Promise.all([
-    fetch('/api/media').then(r => r.json()),
-    fetch('/api/project').then(r => r.json()),
-  ]);
+  // The open project, or a first one on a fresh install.
+  const project = (await fetch('/api/project').then(r => r.json())) || (await createProject(defaultProject().name));
+  const media = await fetch(`/api/media?project=${project.id}`).then(r => r.json());
   state.media = Object.fromEntries(media.map(m => [m.id, m]));
-  state.project = project || defaultProject();
+  state.project = project;
   // Drop clips whose media vanished.
   for (const t of state.project.tracks) t.clips = t.clips.filter(c => state.media[c.mediaId]);
   resetHistory();
+  // Canvas text doesn't trigger web-font loading (notably in WebKit), so load caption fonts up front.
+  if (document.fonts) FONTS.forEach(f => [400, 500, 700, 800, 900].forEach(w => document.fonts.load(`${w} 40px "${f}"`).catch(() => {})));
 
   initPreview($('#preview'));
   initTimeline($('#timeline'));
@@ -33,7 +37,10 @@ async function boot() {
   syncTopbar();
   if (projectDuration() > 0) requestAnimationFrame(zoomToFit);
 
+  loadProjectAudio();
+  warmPreviews();
   on(kind => {
+    if (kind === 'all') { loadProjectAudio(); warmPreviews(); refreshPlayback(); }
     if (kind === 'all' || kind === 'sel' || kind === 'live') renderTimeline();
     if (kind === 'all' || kind === 'sel') { renderInspector(); renderCaptionsTab(); }
     if (kind === 'all') syncTopbar();
@@ -68,6 +75,7 @@ function syncTopbar() {
 }
 
 function bindUI() {
+  $('#projectsBtn').onclick = showProjects;
   $('#projectName').onchange = e => { state.project.name = e.target.value || 'My video'; commit(); };
   $('#undoBtn').onclick = undo;
   $('#redoBtn').onclick = redo;
@@ -120,7 +128,15 @@ function bindUI() {
     if (e.key === 'Escape') {
       if (cancelDrag()) return;
       if (typing) { e.target.blur(); return; }
-      state.sel = null; emit('sel'); return;
+      state.sel = null; state.multi.clear(); emit('sel'); return;
+    }
+    // ⌘A / Ctrl+A: select text in a field, otherwise every clip and caption on the timeline.
+    // (In the macOS app the page must handle it: pywebview's native select-all is bypassed.)
+    if (mod && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      if (typing) e.target.select?.();
+      else { selectAll(); emit('sel'); }
+      return;
     }
     if (typing) return;
     if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (isDragging()) return; e.shiftKey ? redo() : undo(); return; }

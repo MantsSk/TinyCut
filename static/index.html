@@ -5,18 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TinyCutOpus</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bangers&family=Bebas+Neue&family=Inter:wght@400;500;600;700;800&family=Manrope:wght@800&family=Montserrat:wght@700;800;900&family=Permanent+Marker&family=Poppins:wght@500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/fonts.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand"><span class="brand-mark"><i></i><i></i></span><span>TinyCutOpus</span></div>
+  <button id="projectsBtn" title="Open, create or delete projects">▤ Projects</button>
   <input id="projectName" class="project-name" spellcheck="false" title="Project name">
   <div class="spacer"></div>
-  <button id="undoBtn" class="icon-btn" title="Undo (⌘Z)">↶</button>
-  <button id="redoBtn" class="icon-btn" title="Redo (⇧⌘Z)">↷</button>
+  <button id="undoBtn" class="icon-btn" title="Undo">↶</button>
+  <button id="redoBtn" class="icon-btn" title="Redo">↷</button>
   <button id="exportBtn" class="primary">Export</button>
 </header>
 
@@ -52,7 +51,7 @@
     <button id="addTextBtn" title="Add a text caption at the playhead (T)">＋ Text</button>
     <label class="chk"><input type="checkbox" id="snapChk" checked> Snap</label>
     <div class="spacer"></div>
-    <span class="dim small" id="tlHint">Drag clips to rearrange · drag edges to trim · ⌘/Ctrl + scroll to zoom</span>
+    <span class="dim small" id="tlHint">Drag clips to rearrange · drag edges to trim · Ctrl/⌘ + scroll to zoom</span>
     <button id="zoomOut" class="icon-btn" title="Zoom out (-)">−</button>
     <input type="range" id="zoom" min="0" max="100" value="45">
     <button id="zoomIn" class="icon-btn" title="Zoom in (+)">＋</button>

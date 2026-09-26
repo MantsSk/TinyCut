@@ -11,9 +11,13 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
+import sys
 import threading
 import time
+import urllib.request
+from urllib.parse import urlsplit
 import uuid
 from pathlib import Path
 
@@ -21,16 +25,20 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-BASE = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)  # running inside the packaged desktop app
+BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 DATA = Path(os.getenv("TINYCUT_DATA", BASE / "data"))
 MEDIA_DIR = DATA / "media"
-EXPORT_DIR = DATA / "exports"
+EXPORT_DIR = Path(os.getenv("TINYCUT_EXPORTS", DATA / "exports"))
 WORK_DIR = DATA / "work"
-for d in (MEDIA_DIR, EXPORT_DIR, WORK_DIR):
+MODELS_DIR = DATA / "models"
+PROJECTS_DIR = DATA / "projects"
+for d in (MEDIA_DIR, EXPORT_DIR, WORK_DIR, MODELS_DIR, PROJECTS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 MEDIA_INDEX = DATA / "media.json"
-PROJECT_FILE = DATA / "project.json"
+SESSION_FILE = DATA / "session.json"
+PROJECT_FILE = DATA / "project.json"  # pre-projects single project, migrated on start
 
 FFMPEG = os.getenv("FFMPEG_PATH", "ffmpeg")
 FFPROBE = os.getenv("FFPROBE_PATH", "ffprobe")
@@ -43,6 +51,19 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 app = FastAPI(title="TinyCutOpus")
 _lock = threading.Lock()
+
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    """Only this app's own pages may use the server: other websites open in the same browser can't
+    send it requests (cross-site requests) or reach it through a rebound domain name (DNS rebinding)."""
+    host = urlsplit("//" + request.headers.get("host", "")).hostname
+    origin = request.headers.get("origin")
+    if host not in LOCAL_HOSTS or (origin and urlsplit(origin).hostname not in LOCAL_HOSTS):
+        return JSONResponse({"detail": "Forbidden"}, status_code=403)
+    return await call_next(request)
 jobs: dict[str, dict] = {}
 
 
@@ -52,17 +73,13 @@ def find_whisper_model() -> str | None:
     env = os.getenv("WHISPER_MODEL")
     if env and Path(env).exists():
         return env
-    candidates = [
-        BASE / "models",
-        Path.home() / ".cache" / "whisper",
-        Path.home() / "Desktop" / "NewEssayAutomator" / ".transcription-models",
-        Path("/opt/homebrew/share/whisper-cpp"),
-    ]
+    # Only the app's own folders: anything else would make it depend on this particular machine.
+    candidates = [MODELS_DIR] if FROZEN else [MODELS_DIR, BASE / "models"]
     prefs = ["ggml-large-v3-turbo", "ggml-medium", "ggml-small", "ggml-base", "ggml-tiny"]
     found = []
     for c in candidates:
         if c.is_dir():
-            found += list(c.glob("ggml-*.bin"))
+            found += [f for f in c.glob("ggml-*.bin") if f.stat().st_size > 1_000_000]
     for p in prefs:
         for f in found:
             if f.name.startswith(p):
@@ -72,14 +89,14 @@ def find_whisper_model() -> str | None:
 
 def load_json(path: Path, default):
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
 
 
 def save_json(path: Path, data):
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
     tmp.replace(path)
 
 
@@ -87,8 +104,23 @@ def media_index() -> dict:
     return load_json(MEDIA_INDEX, {})
 
 
+# Don't flash a console window for every ffmpeg call in the Windows app.
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+
+
+MISSING_TOOL_HINT = {
+    "ffmpeg": "Install FFmpeg (macOS: brew install ffmpeg · Linux: apt install ffmpeg · Windows: winget install ffmpeg) or set FFMPEG_PATH.",
+    "ffprobe": "Install FFmpeg (it includes ffprobe) or set FFPROBE_PATH.",
+    "whisper-cli": "Install whisper.cpp (macOS: brew install whisper-cpp) or set WHISPER_CLI. The desktop app bundles it.",
+}
+
+
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **NO_WINDOW)
+    except FileNotFoundError:
+        tool = Path(cmd[0]).stem
+        raise HTTPException(500, f"{tool} was not found. {MISSING_TOOL_HINT.get(tool, '')}".strip())
 
 
 def probe(path: Path) -> dict:
@@ -116,7 +148,7 @@ def probe(path: Path) -> dict:
 # ---------------------------------------------------------------- media
 
 @app.post("/api/media")
-async def upload_media(file: UploadFile = File(...)):
+async def upload_media(file: UploadFile = File(...), project: str = ""):
     ext = Path(file.filename or "clip.mp4").suffix.lower() or ".mp4"
     mid = uuid.uuid4().hex[:10]
     folder = MEDIA_DIR / mid
@@ -126,7 +158,11 @@ async def upload_media(file: UploadFile = File(...)):
         while chunk := await file.read(1 << 20):
             f.write(chunk)
 
-    info = probe(src)
+    try:
+        info = probe(src)
+    except HTTPException:  # e.g. ffprobe missing: don't leave an orphan folder behind
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     if ext in IMAGE_EXTS:
         kind = "image"
         info["duration"] = 5.0
@@ -152,6 +188,7 @@ async def upload_media(file: UploadFile = File(...)):
         "kind": kind,
         "source": str(src),
         "play": f"/files/media/{mid}/{src.name}",
+        "projects": [project or current_project_id()],
         **info,
     }
 
@@ -195,20 +232,69 @@ async def upload_media(file: UploadFile = File(...)):
 
 
 @app.get("/api/media")
-def list_media():
-    return list(media_index().values())
+def list_media(project: str = ""):
+    items = media_index().values()
+    return [m for m in items if not project or project in m.get("projects", [])]
 
 
 @app.delete("/api/media/{mid}")
-def delete_media(mid: str):
+def delete_media(mid: str, project: str = ""):
+    """Remove media from a project's bin; the files go once no project uses it (or when no project is given)."""
     with _lock:
         idx = media_index()
-        if mid not in idx:
+        item = idx.get(mid)
+        if not item:
             raise HTTPException(404)
-        del idx[mid]
+        owners = item.get("projects", [])
+        if project in owners:
+            owners.remove(project)
+        orphan = not project or not owners
+        if orphan:
+            del idx[mid]
         save_json(MEDIA_INDEX, idx)
-    shutil.rmtree(MEDIA_DIR / mid, ignore_errors=True)
+    if orphan:
+        delete_media_files(mid)
     return {"ok": True}
+
+
+_proxy_locks: dict[str, threading.Lock] = {}
+
+
+@app.api_route("/api/media/{mid}/preview-audio", methods=["GET", "HEAD"])
+def preview_audio(mid: str):
+    """Small mono WAV of a clip's sound for the editor's Web Audio playback (export uses the original)."""
+    item = media_index().get(mid)
+    if not item or not item.get("has_audio"):
+        raise HTTPException(404)
+    wav = MEDIA_DIR / mid / "preview_audio.wav"
+    with _proxy_locks.setdefault(f"{mid}:audio", threading.Lock()):
+        if not wav.exists():
+            tmp = wav.with_suffix(".tmp.wav")
+            r = run([FFMPEG, "-y", "-i", item["source"], "-vn", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(tmp)])
+            if r.returncode != 0:
+                raise HTTPException(500, "Could not extract audio")
+            tmp.replace(wav)
+    return FileResponse(wav, media_type="audio/wav")
+
+
+@app.api_route("/api/media/{mid}/preview-webm", methods=["GET", "HEAD"])
+def preview_webm(mid: str):
+    """VP9 WebM copy (≤720p, no audio) for editors whose engine can't decode the original codec:
+    Qt WebEngine on Linux has no H.264/HEVC, Edge WebView2 on Windows usually has no HEVC."""
+    item = media_index().get(mid)
+    if not item or item.get("kind") != "video":
+        raise HTTPException(404)
+    out = MEDIA_DIR / mid / "preview.webm"
+    with _proxy_locks.setdefault(mid, threading.Lock()):
+        if not out.exists():
+            tmp = out.with_suffix(".tmp.webm")
+            r = run([FFMPEG, "-y", "-i", item["source"], "-an", "-vf", "scale=-2:'min(720,ih)'",
+                     "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1",
+                     "-b:v", "2M", str(tmp)])
+            if r.returncode != 0:
+                raise HTTPException(500, "Could not create preview video")
+            tmp.replace(out)
+    return FileResponse(out, media_type="video/webm")
 
 
 # ---------------------------------------------------------------- transcription
@@ -246,7 +332,7 @@ def transcribe(mid: str, language: str = "auto", force: bool = False):
 
     model = find_whisper_model()
     if not model:
-        raise HTTPException(500, "No whisper.cpp model found. Put a ggml-*.bin in ./models or set WHISPER_MODEL.")
+        raise HTTPException(409, "no_model")
     wav = folder / "audio16k.wav"
     r = run([FFMPEG, "-y", "-i", item["source"], "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)])
     if r.returncode != 0:
@@ -262,17 +348,167 @@ def transcribe(mid: str, language: str = "auto", force: bool = False):
     return {"words": words}
 
 
-# ---------------------------------------------------------------- project
+# ---------------------------------------------------------------- projects
+# Each project is projects/<id>.json; session.json remembers which one is open.
+# Media is stored once and lists the projects whose media bin it is in ("projects": [ids]).
+
+def project_path(pid: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{6,32}", pid or ""):
+        raise HTTPException(400, "Bad project id")
+    return PROJECTS_DIR / f"{pid}.json"
+
+
+def load_project(pid: str | None) -> dict | None:
+    if not pid:
+        return None
+    try:
+        return load_json(project_path(pid), None)
+    except HTTPException:
+        return None
+
+
+def current_project_id() -> str | None:
+    pid = load_json(SESSION_FILE, {}).get("current")
+    if load_project(pid):
+        return pid
+    # The open project is gone: fall back to the most recently edited one.
+    newest = max(PROJECTS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, default=None)
+    return newest.stem if newest else None
+
+
+def set_current_project(pid: str):
+    save_json(SESSION_FILE, {"current": pid})
+
+
+def new_project_id() -> str:
+    return uuid.uuid4().hex[:10]
+
+
+def migrate_single_project():
+    """Older versions kept one project in project.json and one shared media bin."""
+    if not PROJECT_FILE.exists() or any(PROJECTS_DIR.glob("*.json")):
+        return
+    project = load_json(PROJECT_FILE, None)
+    if not project:
+        return
+    pid = project.get("id") or new_project_id()
+    project["id"] = pid
+    save_json(PROJECTS_DIR / f"{pid}.json", project)
+    with _lock:
+        idx = media_index()
+        for item in idx.values():
+            item.setdefault("projects", [pid])
+        save_json(MEDIA_INDEX, idx)
+    set_current_project(pid)
+    PROJECT_FILE.replace(PROJECT_FILE.with_name("project.before-projects.json"))
+
+
+def delete_media_files(mid: str):
+    shutil.rmtree(MEDIA_DIR / Path(mid).name, ignore_errors=True)
+
+
+def project_summary(pid: str, project: dict, idx: dict) -> dict:
+    clips = [c for t in project.get("tracks", []) for c in t.get("clips", [])]
+    ends = [c["start"] + c["out"] - c["in"] for c in clips]
+    first = next((idx.get(c["mediaId"]) for t in project.get("tracks", []) if t.get("main")
+                  for c in sorted(t.get("clips", []), key=lambda c: c["start"])), None)
+    return {
+        "id": pid,
+        "name": project.get("name") or "Untitled",
+        "updated": (PROJECTS_DIR / f"{pid}.json").stat().st_mtime,
+        "duration": max(ends, default=0),
+        "aspect": project.get("settings", {}).get("aspect"),
+        "thumb": (first or {}).get("thumb"),
+    }
+
 
 @app.get("/api/project")
 def get_project():
-    return load_json(PROJECT_FILE, None)
+    """The open project (with its "id"), or null when there are none yet."""
+    pid = current_project_id()
+    project = load_project(pid)
+    if project:
+        project["id"] = pid
+    return project
 
 
 @app.put("/api/project")
 async def put_project(request: Request):
-    save_json(PROJECT_FILE, await request.json())
+    project = await request.json()
+    path = project_path(project.get("id", ""))
+    if not path.exists():
+        raise HTTPException(404, "Project was deleted")
+    save_json(path, project)
     return {"ok": True}
+
+
+@app.get("/api/projects")
+def list_projects():
+    idx = media_index()
+    out = []
+    for f in PROJECTS_DIR.glob("*.json"):
+        project = load_json(f, None)
+        if project:
+            out.append(project_summary(f.stem, project, idx))
+    return {"current": current_project_id(), "projects": sorted(out, key=lambda p: -p["updated"])}
+
+
+@app.post("/api/projects")
+async def create_project(request: Request):
+    """Body: a fresh project (the client owns the default layout). Becomes the open project."""
+    project = await request.json()
+    pid = new_project_id()
+    project["id"] = pid
+    save_json(PROJECTS_DIR / f"{pid}.json", project)
+    set_current_project(pid)
+    return project
+
+
+@app.post("/api/projects/{pid}/open")
+def open_project(pid: str):
+    if not load_project(pid):
+        raise HTTPException(404, "Unknown project")
+    set_current_project(pid)
+    return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/duplicate")
+def duplicate_project(pid: str):
+    project = load_project(pid)
+    if not project:
+        raise HTTPException(404, "Unknown project")
+    new = new_project_id()
+    project.update(id=new, name=f"{project.get('name') or 'Untitled'} copy")
+    save_json(PROJECTS_DIR / f"{new}.json", project)
+    with _lock:
+        idx = media_index()
+        for item in idx.values():
+            if pid in item.get("projects", []):
+                item["projects"].append(new)
+        save_json(MEDIA_INDEX, idx)
+    return project_summary(new, project, idx)
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    path = project_path(pid)
+    if not path.exists():
+        raise HTTPException(404, "Unknown project")
+    path.unlink()
+    # Media that no other project uses goes too.
+    orphans = []
+    with _lock:
+        idx = media_index()
+        for mid, item in list(idx.items()):
+            if pid in item.get("projects", []):
+                item["projects"].remove(pid)
+                if not item["projects"]:
+                    orphans.append(mid)
+                    del idx[mid]
+        save_json(MEDIA_INDEX, idx)
+    for mid in orphans:
+        delete_media_files(mid)
+    return {"ok": True, "current": current_project_id()}
 
 
 # ---------------------------------------------------------------- export
@@ -375,9 +611,10 @@ def build_export_cmd(project: dict, caption_list: Path | None, out: Path) -> tup
 def run_export(job_id: str, cmd: list[str], duration: float, workdir: Path):
     job = jobs[job_id]
     job["status"] = "rendering"
-    (workdir / "cmd.txt").write_text(" ".join(f"'{a}'" if " " in a or ";" in a else a for a in cmd))
-    errlog = open(workdir / "ffmpeg.log", "w")
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog, text=True)
+    (workdir / "cmd.txt").write_text(" ".join(f"'{a}'" if " " in a or ";" in a else a for a in cmd), encoding="utf-8")
+    errlog = open(workdir / "ffmpeg.log", "w", encoding="utf-8")
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog, text=True, encoding="utf-8",
+                         errors="replace", **NO_WINDOW)
     for line in p.stdout:
         if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
             try:
@@ -391,7 +628,7 @@ def run_export(job_id: str, cmd: list[str], duration: float, workdir: Path):
         job.update(status="done", progress=1.0)
         shutil.rmtree(workdir, ignore_errors=True)
     else:
-        tail = (workdir / "ffmpeg.log").read_text()[-1500:]
+        tail = (workdir / "ffmpeg.log").read_text(encoding="utf-8", errors="replace")[-1500:]
         job.update(status="error", error=tail)
 
 
@@ -412,11 +649,11 @@ async def export(request: Request):
             dest = workdir / f"cap{entry['file']:05d}.png"
             if not dest.exists():
                 dest.write_bytes(await up.read())
-            lines += [f"file '{dest}'", f"duration {entry['dur']:.4f}"]
+            lines += [f"file '{dest.as_posix()}'", f"duration {entry['dur']:.4f}"]
         # concat demuxer needs the last file repeated for its duration to count.
-        lines.append(f"file '{workdir / ('cap%05d.png' % manifest[-1]['file'])}'")
+        lines.append(f"file '{(workdir / ('cap%05d.png' % manifest[-1]['file'])).as_posix()}'")
         caption_list = workdir / "captions.txt"
-        caption_list.write_text("\n".join(lines) + "\n")
+        caption_list.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     name = re.sub(r"[^\w\-]+", "_", project.get("name") or "tinycutopus").strip("_") or "tinycutopus"
     out = EXPORT_DIR / f"{name}_{time.strftime('%Y%m%d-%H%M%S')}.mp4"
@@ -434,6 +671,7 @@ def export_status(job_id: str):
     out = dict(job)
     if job["status"] == "done":
         out["url"] = f"/api/exports/{job['file']}"
+        out["folder"] = str(EXPORT_DIR).replace(str(Path.home()), "~")
     return out
 
 
@@ -445,10 +683,67 @@ def download_export(name: str):
     return FileResponse(path, media_type="video/mp4", filename=path.name)
 
 
+# ---------------------------------------------------------------- speech model download
+
+MODELS = {
+    "base": {"label": "Fast", "size_mb": 148},
+    "small": {"label": "Accurate", "size_mb": 488},
+}
+MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin"
+model_job: dict = {"status": "idle"}
+
+
+def download_model(name: str):
+    dest = MODELS_DIR / f"ggml-{name}.bin"
+    part = dest.with_suffix(".part")
+    try:
+        req = urllib.request.Request(MODEL_URL.format(name=name), headers={"User-Agent": "TinyCutOpus"})
+        try:  # python.org / frozen builds ship without system CA roots
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as r, open(part, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+                done += len(chunk)
+                model_job.update(done=done, total=total)
+        # urllib doesn't raise when the connection drops early; a truncated model would be picked up forever.
+        if total and done != total:
+            raise IOError(f"Download interrupted ({done // 1_000_000} of {total // 1_000_000} MB)")
+        part.replace(dest)
+        model_job.update(status="done")
+    except Exception as e:
+        part.unlink(missing_ok=True)
+        model_job.update(status="error", error=str(e))
+
+
+@app.post("/api/model/download")
+def start_model_download(name: str = "small"):
+    if name not in MODELS:
+        raise HTTPException(400, "Unknown model")
+    if model_job.get("status") == "downloading":
+        return model_job
+    model_job.clear()
+    model_job.update(status="downloading", name=name, done=0, total=MODELS[name]["size_mb"] * 1_000_000)
+    threading.Thread(target=download_model, args=(name,), daemon=True).start()
+    return model_job
+
+
+@app.get("/api/model/download")
+def model_download_status():
+    return model_job
+
+
 @app.get("/api/status")
 def status():
-    return {"whisper": bool(shutil.which(WHISPER_CLI)), "model": find_whisper_model()}
+    return {"whisper": bool(shutil.which(WHISPER_CLI)), "model": find_whisper_model(), "models": MODELS,
+            "desktop": FROZEN or bool(os.getenv("TINYCUT_DESKTOP")), "exports": str(EXPORT_DIR)}
 
+
+migrate_single_project()
 
 app.mount("/files", StaticFiles(directory=DATA), name="files")
 app.mount("/", StaticFiles(directory=BASE / "static", html=True), name="static")

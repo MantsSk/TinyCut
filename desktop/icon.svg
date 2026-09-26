@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- macOS icon grid: 824px rounded square centred on a 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#17191d"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185" fill="none" stroke="#30343b" stroke-width="3"/>
+  <g fill="#e9f56c" transform="rotate(-21 512 512)">
+    <rect x="330" y="400" width="150" height="300" rx="26"/>
+    <rect x="514" y="320" width="150" height="380" rx="26"/>
+  </g>
+</svg>

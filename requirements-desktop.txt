@@ -1,0 +1,8 @@
+-r requirements.txt
+pywebview==6.2.1
+pyinstaller==6.22.3
+# Windows uses Edge WebView2 through pythonnet (pulled in by pywebview).
+# Linux uses Qt WebEngine (Chromium) so the AppImage doesn't depend on the system browser engine.
+PyQt6==6.11.0; sys_platform == "linux"
+PyQt6-WebEngine==6.11.0; sys_platform == "linux"
+QtPy; sys_platform == "linux"

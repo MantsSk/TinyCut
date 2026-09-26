@@ -12,7 +12,8 @@ export const ASPECTS = {
 export const state = {
   project: null,
   media: {},          // id -> media item from the server
-  sel: null,          // {kind:'clip'|'seg'|'ctrack'|'track', id}
+  sel: null,          // primary selection {kind:'clip'|'seg'|'ctrack'|'track', id}; drives the inspector
+  multi: new Set(),   // clip/segment ids when several are selected (only counts while it contains sel.id)
   time: 0,
   playing: false,
   pps: 60,            // timeline pixels per second
@@ -76,16 +77,22 @@ export const canRedo = () => future.length > 0;
 
 function scheduleSave() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: current });
-  }, 400);
+  saveTimer = setTimeout(flushSave, 400);
+}
+
+/** Save now if an autosave is pending (e.g. before switching projects). */
+export function flushSave() {
+  if (!saveTimer) return Promise.resolve();
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  return fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: current }).catch(() => {});
 }
 
 // ---------------------------------------------------------------- model helpers
 
-export function defaultProject() {
+export function defaultProject(name = 'My video') {
   return {
-    name: 'My video',
+    name,
     settings: { aspect: '16:9', res: 1080, width: 1920, height: 1080, fps: 30 },
     tracks: [{ id: uid(), name: 'Main', main: true, clips: [] }],
     captionTracks: [],
@@ -238,30 +245,33 @@ export function setAspect(aspect, res = state.project.settings.res || 1080) {
   s.height = Math.round(h * k / 2) * 2;
 }
 
+/** Split every selected clip / caption under the playhead (or the main-track clip there). */
 export function splitAt(t = state.time) {
-  let targets = [];
-  const sel = state.sel;
-  if (sel?.kind === 'clip') {
-    const f = findClip(sel.id);
-    if (f && t > f.clip.start + 0.05 && t < clipEnd(f.clip) - 0.05) targets.push(f);
-  } else if (sel?.kind === 'seg') {
-    const f = findSeg(sel.id);
-    if (f && t > f.seg.start + 0.05 && t < f.seg.end - 0.05) return splitSeg(f, t);
+  const inside = (a, b) => t > a + 0.05 && t < b - 0.05;
+  const clips = [], segs = [];
+  for (const id of selectedIds()) {
+    const c = findClip(id);
+    if (c && inside(c.clip.start, clipEnd(c.clip))) clips.push(c);
+    const s = findSeg(id);
+    if (s && inside(s.seg.start, s.seg.end)) segs.push(s);
   }
-  if (!targets.length) {
+  if (!clips.length && !segs.length) {
     // Nothing selected under playhead: split the main-track clip.
     const main = mainTrack();
-    const c = main.clips.find(c => t > c.start + 0.05 && t < clipEnd(c) - 0.05);
-    if (c) targets.push({ track: main, clip: c });
+    const c = main.clips.find(c => inside(c.start, clipEnd(c)));
+    if (c) clips.push({ track: main, clip: c });
   }
-  if (!targets.length) return false;
-  for (const { track, clip } of targets) {
+  if (!clips.length && !segs.length) return false;
+  let last = null;
+  for (const { track, clip } of clips) {
     const cut = clip.in + (t - clip.start);
     const b = { ...clip, id: uid(), start: t, in: cut };
     clip.out = cut;
     track.clips.splice(track.clips.indexOf(clip) + 1, 0, b);
-    state.sel = { kind: 'clip', id: b.id };
+    last = { kind: 'clip', id: b.id };
   }
+  for (const f of segs) last = { kind: 'seg', id: splitSeg(f, t).id };
+  state.sel = last;
   commit();
   return true;
 }
@@ -273,16 +283,26 @@ function splitSeg({ ctrack, seg }, t) {
   if (!b.words.length) b.words = [{ t0: t, t1: b.end, text: '…' }];
   if (!seg.words.length) seg.words = [{ t0: seg.start, t1: t, text: '…' }];
   ctrack.segments.splice(ctrack.segments.indexOf(seg) + 1, 0, b);
-  state.sel = { kind: 'seg', id: b.id };
-  commit();
-  return true;
+  return b;
 }
 
 export function deleteSelection() {
   const sel = state.sel;
   if (!sel) return;
   const p = state.project;
-  if (sel.kind === 'clip') {
+  const ids = selectedIds();
+  if (ids.size > 1) {
+    const emptied = new Set();
+    for (const t of p.tracks) {
+      const n = t.clips.length;
+      t.clips = t.clips.filter(c => !ids.has(c.id));
+      if (t.clips.length === n) continue;
+      repack(t);
+      if (!t.main && !t.clips.length) emptied.add(t);
+    }
+    p.tracks = p.tracks.filter(t => !emptied.has(t));
+    for (const ct of p.captionTracks) ct.segments = ct.segments.filter(s => !ids.has(s.id));
+  } else if (sel.kind === 'clip') {
     const f = findClip(sel.id);
     if (!f) return;
     f.track.clips.splice(f.index, 1);
@@ -304,6 +324,7 @@ export function deleteSelection() {
 }
 
 export function validateSel() {
+  for (const id of state.multi) if (!selFor(id)) state.multi.delete(id);
   const s = state.sel;
   if (!s) return;
   const ok = s.kind === 'clip' ? findClip(s.id)
@@ -311,6 +332,47 @@ export function validateSel() {
     : s.kind === 'ctrack' ? state.project.captionTracks.find(t => t.id === s.id)
     : state.project.tracks.find(t => t.id === s.id);
   if (!ok) state.sel = null;
+}
+
+// ---------------------------------------------------------------- multi-selection
+// state.sel stays the "primary" item (what the inspector shows). state.multi holds every selected
+// clip / caption id, and only counts while it contains state.sel — so any code that simply sets
+// state.sel to something else gets a plain single selection again.
+
+/** {kind, id} for a clip or caption segment id, else null. */
+export function selFor(id) {
+  if (findClip(id)) return { kind: 'clip', id };
+  if (findSeg(id)) return { kind: 'seg', id };
+  return null;
+}
+
+/** Ids of every selected clip / caption segment. */
+export function selectedIds() {
+  const s = state.sel;
+  if (!s || (s.kind !== 'clip' && s.kind !== 'seg')) return new Set();
+  if (state.multi.size > 1 && state.multi.has(s.id)) return new Set(state.multi);
+  return new Set([s.id]);
+}
+
+export const isSelected = id => selectedIds().has(id);
+
+/** Select exactly these clip / caption ids (primary = `primary` if given and included, else the first). */
+export function selectIds(ids, primary) {
+  ids = [...ids].filter(id => selFor(id));
+  state.multi = new Set(ids);
+  state.sel = selFor(ids.includes(primary) ? primary : ids[0]) || null;
+}
+
+/** Shift / ⌘-click: add or remove one item. */
+export function toggleSelected(id) {
+  const ids = selectedIds();
+  if (ids.has(id)) ids.delete(id); else ids.add(id);
+  selectIds(ids, ids.has(id) ? id : state.sel?.id);
+}
+
+export function selectAll() {
+  const p = state.project;
+  selectIds([...p.tracks.flatMap(t => t.clips.map(c => c.id)), ...p.captionTracks.flatMap(t => t.segments.map(s => s.id))]);
 }
 
 // ---------------------------------------------------------------- captions

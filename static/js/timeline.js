@@ -2,6 +2,7 @@
 import {
   state, emit, commit, revert, findClip, findSeg, clipDur, clipEnd, repack, sortClips, overlaps,
   placeFree, insertIntoMain, makeClip, mediaMaxOut, moveSeg, projectDuration, newTrack,
+  selectedIds, selectIds, toggleSelected,
 } from './store.js';
 import { seek, pause } from './preview.js';
 import { esc, fmtShort, clamp } from './util.js';
@@ -35,7 +36,8 @@ export const isDragging = () => !!drag?.started;
 
 export function cancelDrag() {
   if (!drag) return false;
-  const wasEdit = drag.started && drag.type !== 'scrub';
+  const wasEdit = drag.started && drag.type !== 'scrub' && drag.type !== 'marquee';
+  if (drag.type === 'marquee') { drag.box?.remove(); emit('sel'); }
   drag = null;
   if (wasEdit) revert();
   return true;
@@ -65,8 +67,8 @@ function clipHTML(c, track) {
   const m = state.media[c.mediaId];
   const pps = state.pps;
   const kind = c.audioOnly ? 'audio' : (m?.kind || 'video');
-  const sel = state.sel?.kind === 'clip' && state.sel.id === c.id;
-  const dragging = drag?.started && drag.id === c.id;
+  const sel = selIds.has(c.id);
+  const dragging = drag?.started && (drag.id === c.id || drag.group?.some(g => g.id === c.id));
   let inner = '';
   if (m?.strip && !c.audioOnly) {
     inner += kind === 'image'
@@ -90,17 +92,20 @@ function clipHTML(c, track) {
 
 function segHTML(s) {
   const pps = state.pps;
-  const sel = state.sel?.kind === 'seg' && state.sel.id === s.id;
-  const dragging = drag?.started && drag.id === s.id;
+  const sel = selIds.has(s.id);
+  const dragging = drag?.started && (drag.id === s.id || drag.group?.some(g => g.id === s.id));
   const text = s.words.map(w => w.text).join(' ');
   return `<div class="seg${sel ? ' sel' : ''}${dragging ? ' dragging' : ''}" data-id="${s.id}"
     style="left:${s.start * pps}px;width:${Math.max(3, (s.end - s.start) * pps)}px" title="${esc(text)}">
     ${esc(text)}<div class="handle l"></div><div class="handle r"></div></div>`;
 }
 
+let selIds = new Set();  // snapshot of the selection for one render
+
 export function renderTimeline() {
   const p = state.project;
   if (!p || !root) return;
+  selIds = selectedIds();
   const pps = state.pps;
   const D = projectDuration();
   const laneW = Math.max(root.clientWidth - HEAD, (D + 30) * pps);
@@ -163,10 +168,12 @@ export function updatePlayhead(t) {
 
 // ---------------------------------------------------------------- snapping
 
+/** selfId: an id or a Set of ids whose edges shouldn't attract (the things being dragged). */
 function snapPoints(selfId) {
+  const skip = selfId instanceof Set ? selfId : new Set([selfId]);
   const pts = [0, state.time];
-  for (const t of state.project.tracks) for (const c of t.clips) if (c.id !== selfId) pts.push(c.start, clipEnd(c));
-  for (const t of state.project.captionTracks) for (const s of t.segments) if (s.id !== selfId) pts.push(s.start, s.end);
+  for (const t of state.project.tracks) for (const c of t.clips) if (!skip.has(c.id)) pts.push(c.start, clipEnd(c));
+  for (const t of state.project.captionTracks) for (const s of t.segments) if (!skip.has(s.id)) pts.push(s.start, s.end);
   return pts;
 }
 
@@ -217,6 +224,24 @@ function onDown(e) {
   const segEl = e.target.closest('.seg');
   const handle = e.target.closest('.handle');
   const base = { x0: e.clientX, y0: e.clientY, started: false };
+  const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+  const itemEl = clipEl || segEl;
+  if (itemEl && additive) {
+    // Shift / ⌘ / Ctrl-click adds or removes one item.
+    toggleSelected(itemEl.dataset.id);
+    emit('sel');
+    e.preventDefault();
+    return;
+  }
+  // Grabbing (not trimming) an item of a multi-selection moves the whole group.
+  const group = itemEl && !handle && selectedIds().has(itemEl.dataset.id) && selectedIds().size > 1;
+  if (group && !(clipEl && findClip(clipEl.dataset.id)?.track.main)) {
+    selectIds(selectedIds(), itemEl.dataset.id);
+    drag = { ...base, type: 'group', id: itemEl.dataset.id, t0: timeAtX(e.clientX), group: groupSnapshot() };
+    emit('sel');
+    e.preventDefault();
+    return;
+  }
   if (clipEl) {
     const f = findClip(clipEl.dataset.id);
     if (!f) return;
@@ -245,13 +270,83 @@ function onDown(e) {
     e.preventDefault();
     return;
   }
-  if (e.target.closest('.tl-lane')) {
-    if (!e.target.closest('[data-ruler]') && state.sel) { state.sel = null; emit('sel'); }
+  if (e.target.closest('[data-ruler]')) {
     if (state.playing) pause();
     drag = { ...base, type: 'scrub', started: true };
     seek(timeAtX(e.clientX));
     e.preventDefault();
+  } else if (e.target.closest('.tl-lane')) {
+    // Empty lane: click moves the playhead, drag draws a selection box (Shift adds to the selection).
+    drag = { ...base, type: 'marquee', additive, keep: additive ? selectedIds() : new Set() };
+    e.preventDefault();
   }
+}
+
+/** Where every selected clip / caption starts, for moving them together. Main-track clips stay put. */
+function groupSnapshot() {
+  const out = [];
+  for (const id of selectedIds()) {
+    const c = findClip(id);
+    if (c && !c.track.main) out.push({ id, kind: 'clip', start: c.clip.start, dur: clipDur(c.clip) });
+    const s = findSeg(id);
+    if (s) out.push({ id, kind: 'seg', start: s.seg.start, dur: s.seg.end - s.seg.start, end: s.seg.end, words: JSON.parse(JSON.stringify(s.seg.words)) });
+  }
+  return out;
+}
+
+function moveGroup(e) {
+  const lead = drag.group.find(g => g.id === drag.id) || drag.group[0];
+  if (!lead) return;
+  let dt = timeAtX(e.clientX) - drag.t0;
+  dt = snapSpan(lead.start + dt, lead.dur, new Set(drag.group.map(g => g.id))) - lead.start;
+  dt = Math.max(dt, -Math.min(...drag.group.map(g => g.start)));  // nothing before 0
+  for (const g of drag.group) {
+    if (g.kind === 'clip') {
+      const f = findClip(g.id);
+      if (f) f.clip.start = g.start + dt;
+    } else {
+      const f = findSeg(g.id);
+      if (!f) continue;
+      Object.assign(f.seg, { start: g.start, end: g.end, words: JSON.parse(JSON.stringify(g.words)) });
+      moveSeg(f.seg, g.start + dt);
+    }
+  }
+}
+
+function finishGroup(d) {
+  const moved = new Set(d.group.map(g => g.id));
+  for (const g of d.group) {
+    const f = g.kind === 'clip' && findClip(g.id);
+    if (!f) continue;
+    sortClips(f.track);
+    // Landed on a clip that isn't part of the group: bump it to a free track, as a single move would.
+    const hit = f.track.clips.some(o => !moved.has(o.id) && f.clip.start < clipEnd(o) - 1e-3 && clipEnd(f.clip) > o.start + 1e-3);
+    if (hit) { f.track.clips.splice(f.track.clips.indexOf(f.clip), 1); placeFree(f.clip, f.track); }
+  }
+  for (const ct of state.project.captionTracks) ct.segments.sort((a, b) => a.start - b.start);
+}
+
+function updateMarquee(e) {
+  const r = root.getBoundingClientRect();
+  const x0 = Math.min(drag.x0, e.clientX), x1 = Math.max(drag.x0, e.clientX);
+  const y0 = Math.min(drag.y0, e.clientY), y1 = Math.max(drag.y0, e.clientY);
+  if (!drag.box) {
+    drag.box = document.createElement('div');
+    drag.box.className = 'marquee';
+    root.querySelector('.tl-inner').appendChild(drag.box);
+  }
+  Object.assign(drag.box.style, {
+    left: `${x0 - r.left + root.scrollLeft}px`, top: `${y0 - r.top + root.scrollTop}px`,
+    width: `${x1 - x0}px`, height: `${y1 - y0}px`,
+  });
+  const hits = new Set(drag.keep);
+  root.querySelectorAll('.clip, .seg').forEach(el => {
+    const b = el.getBoundingClientRect();
+    const inside = b.right > x0 && b.left < x1 && b.bottom > y0 && b.top < y1;
+    if (inside) hits.add(el.dataset.id);
+    el.classList.toggle('sel', hits.has(el.dataset.id));
+  });
+  drag.hits = hits;
 }
 
 function onMove(e) {
@@ -261,8 +356,10 @@ function onMove(e) {
     if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 4) return;
     drag.started = true;
   }
+  if (drag.type === 'marquee') { updateMarquee(e); return; }
   showSnap(null);
-  if (drag.kind === 'clip') (drag.type === 'move' ? moveClip : trimClip)(e);
+  if (drag.type === 'group') moveGroup(e);
+  else if (drag.kind === 'clip') (drag.type === 'move' ? moveClip : trimClip)(e);
   else (drag.type === 'move' ? moveSegDrag : trimSegDrag)(e);
   emit('live');
   drawSnap();
@@ -272,9 +369,22 @@ function onUp() {
   if (!drag) return;
   const d = drag;
   drag = null;
+  if (d.type === 'marquee') {
+    d.box?.remove();
+    if (d.started) selectIds(d.hits || d.keep);
+    else {
+      if (!d.additive) { state.sel = null; state.multi.clear(); }
+      if (state.playing) pause();
+      seek(timeAtX(d.x0));
+    }
+    emit('sel');
+    return;
+  }
+  if (d.type === 'group' && !d.started) { selectIds([d.id]); emit('sel'); return; }  // plain click narrows to one
   if (d.type === 'scrub' || !d.started) { if (snapEl) snapEl.classList.add('hidden'); return; }
   const p = state.project;
-  if (d.kind === 'clip') {
+  if (d.type === 'group') finishGroup(d);
+  else if (d.kind === 'clip') {
     const f = findClip(d.id);
     if (f) {
       if (d.newTrack) {

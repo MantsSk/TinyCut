@@ -2,11 +2,11 @@
 import {
   state, emit, commit, findClip, findSeg, clipDur, repack, addMediaToTimeline, setAspect, ASPECTS,
   currentCaptionTrack, newCaptionTrack, applyPreset, regroup, setSegText, addTextCaption, timelineWords,
-  splitAt, deleteSelection, projectDuration, extractAudio, addAudioAt,
+  splitAt, deleteSelection, projectDuration, extractAudio, addAudioAt, selectedIds,
 } from './store.js';
 import { PRESETS, FONTS, resolveStyle, drawSegment, groupWords, toSRT, POSITIONS } from './captions.js';
 import { seek, play, pause } from './preview.js';
-import { $, $$, esc, fmtTime, fmtShort, toast } from './util.js';
+import { $, $$, esc, fmtTime, fmtShort, toast, modal, closeModal, native } from './util.js';
 
 // ================================================================ media bin
 
@@ -55,7 +55,7 @@ function uploadOne(file, row) {
     const xhr = new XMLHttpRequest();
     const fd = new FormData();
     fd.append('file', file);
-    xhr.open('POST', '/api/media');
+    xhr.open('POST', `/api/media?project=${state.project.id}`);
     xhr.upload.onprogress = e => { if (e.lengthComputable) row.querySelector('i').style.width = `${(e.loaded / e.total) * 90}%`; };
     xhr.upload.onload = () => { row.querySelector('span').textContent = `Processing ${file.name}…`; };
     xhr.onload = () => {
@@ -125,8 +125,8 @@ async function toggleRecording() {
 
 async function removeMedia(id) {
   const used = state.project.tracks.some(t => t.clips.some(c => c.mediaId === id));
-  if (used && !confirm('This media is used on the timeline. Remove it and its clips?')) return;
-  await fetch(`/api/media/${id}`, { method: 'DELETE' });
+  if (used && !confirm('This media is used on the timeline. Remove it and its clips from this project?')) return;
+  await fetch(`/api/media/${id}?project=${state.project.id}`, { method: 'DELETE' });
   delete state.media[id];
   for (const t of state.project.tracks) { t.clips = t.clips.filter(c => c.mediaId !== id); repack(t); }
   renderMediaTab();
@@ -169,10 +169,11 @@ export function renderCaptionsTab() {
   $('#srt').onclick = () => {
     const t = currentCaptionTrack();
     if (!t) return;
-    const blob = new Blob([toSRT(t)], { type: 'text/plain' });
+    const name = `${state.project.name || 'captions'} - ${t.name}.srt`;
+    if (native()) { native().save_text(name, toSRT(t)); return; }
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${state.project.name || 'captions'} - ${t.name}.srt`;
+    a.href = URL.createObjectURL(new Blob([toSRT(t)], { type: 'text/plain' }));
+    a.download = name;
     a.click();
   };
   $$('.preset', el).forEach(card => {
@@ -215,7 +216,13 @@ async function generateCaptions() {
     for (let i = 0; i < ids.length; i++) {
       const m = state.media[ids[i]];
       status.textContent = `Transcribing “${m.name}” (${i + 1}/${ids.length})… first run of a long clip can take a moment.`;
-      const r = await fetch(`/api/media/${m.id}/transcribe?language=${state.language}`, { method: 'POST' });
+      let r = await fetch(`/api/media/${m.id}/transcribe?language=${state.language}`, { method: 'POST' });
+      if (r.status === 409) {
+        // First run: no speech model on this machine yet.
+        if (!(await downloadModel())) { status.textContent = 'Captions need the speech model. Click Generate to try again.'; return; }
+        status.textContent = `Transcribing “${m.name}” (${i + 1}/${ids.length})… the very first run takes a few extra seconds.`;
+        r = await fetch(`/api/media/${m.id}/transcribe?language=${state.language}`, { method: 'POST' });
+      }
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || 'Transcription failed');
       transcripts[m.id] = data.words;
@@ -234,9 +241,49 @@ async function generateCaptions() {
   }
 }
 
+/** Ask which Whisper model to fetch, download it with progress. Resolves true when ready. */
+function downloadModel() {
+  return new Promise(resolve => {
+    const card = modal(`
+      <h3>Download the speech model</h3>
+      <p class="dim">Captions are transcribed on this computer. It needs a one-time download of a speech model — pick one:</p>
+      <div class="btn-row">
+        <button class="primary" data-model="small">Accurate · ~490 MB</button>
+        <button data-model="base">Fast · ~150 MB</button>
+      </div>
+      <div id="mProg" class="hidden"><p id="mText" class="dim">Starting…</p><div class="bar"><i id="mBar"></i></div></div>
+      <div class="btn-row" style="justify-content:flex-end;margin-top:14px"><button id="mCancel">Not now</button></div>`);
+    let done = false;
+    const finish = ok => { if (done) return; done = true; closeModal(); resolve(ok); };
+    card.querySelector('#mCancel').onclick = () => finish(false);
+    card.querySelectorAll('[data-model]').forEach(b => {
+      b.onclick = async () => {
+        card.querySelectorAll('[data-model]').forEach(x => { x.disabled = true; });
+        card.querySelector('#mProg').classList.remove('hidden');
+        await fetch(`/api/model/download?name=${b.dataset.model}`, { method: 'POST' });
+        while (!done) {
+          const s = await (await fetch('/api/model/download')).json();
+          if (s.status === 'done') { finish(true); return; }
+          if (s.status === 'error') {
+            card.querySelector('#mText').textContent = `Download failed: ${s.error}`;
+            card.querySelectorAll('[data-model]').forEach(x => { x.disabled = false; });
+            return;
+          }
+          const f = s.total ? s.done / s.total : 0;
+          card.querySelector('#mBar').style.width = `${Math.round(f * 100)}%`;
+          card.querySelector('#mText').textContent = `Downloading… ${Math.round(s.done / 1e6)} / ${Math.round(s.total / 1e6)} MB`;
+          await new Promise(r => setTimeout(r, 400));
+        }
+      };
+    });
+  });
+}
+
 // ================================================================ inspector
 
 const fmtByKey = {};
+const MOD = /Mac/.test(navigator.platform) ? '⌘' : 'Ctrl+';
+const MODKEY = MOD === '⌘' ? '⌘' : 'Ctrl';
 const slider = (label, key, min, max, step, value, fmt = v => (+v).toFixed(2)) => (fmtByKey[key] = fmt, `
   <div class="row"><label>${label}</label><input type="range" data-k="${key}" min="${min}" max="${max}" step="${step}" value="${value}">
   <span class="val" data-v="${key}">${fmt(value)}</span></div>`);
@@ -245,6 +292,8 @@ const pct = v => `${Math.round(v * 100)}%`;
 export function renderInspector() {
   const el = $('#inspector');
   const sel = state.sel;
+  const ids = selectedIds();
+  if (ids.size > 1) return multiInspector(el, ids);
   if (sel?.kind === 'clip') {
     const f = findClip(sel.id);
     if (f) return clipInspector(el, f);
@@ -258,6 +307,23 @@ export function renderInspector() {
     if (t) return trackInspector(el, t);
   }
   projectInspector(el);
+}
+
+function multiInspector(el, ids) {
+  const clips = [...ids].filter(id => findClip(id)).length;
+  const caps = ids.size - clips;
+  const parts = [clips && `${clips} clip${clips > 1 ? 's' : ''}`, caps && `${caps} caption${caps > 1 ? 's' : ''}`].filter(Boolean);
+  el.innerHTML = `
+    <div class="insp-title">${ids.size} items selected</div>
+    <div class="insp-sub">${parts.join(' · ')}</div>
+    <div class="btn-row">
+      <button id="mSplit" title="Split the selected items at the playhead (S)">✂ Split at playhead</button>
+      <button id="mDel" class="danger" title="Delete (⌫)">🗑 Delete</button>
+    </div>
+    <p class="note">Drag any of them to move them together (clips on the MAIN track keep their place).
+      Shift/${MODKEY}-click adds or removes one, drag on an empty part of the timeline to box-select, ${MOD}A selects everything.</p>`;
+  $('#mSplit', el).onclick = () => { if (!splitAt()) toast('Put the playhead over a selected item to split it.'); };
+  $('#mDel', el).onclick = deleteSelection;
 }
 
 function bindInputs(el, apply) {
@@ -419,10 +485,13 @@ function projectInspector(el) {
       <span class="kbd">Space</span><span>Play / pause</span>
       <span class="kbd">S</span><span>Split at playhead</span>
       <span class="kbd">⌫</span><span>Delete selection</span>
+      <span class="kbd">${MOD}A</span><span>Select all clips &amp; captions</span>
+      <span class="kbd">⇧ / ${MODKEY} click</span><span>Add to / remove from selection</span>
+      <span class="kbd">drag empty lane</span><span>Box-select</span>
       <span class="kbd">T</span><span>Add text caption</span>
       <span class="kbd">← →</span><span>Step one frame (⇧ = 1s)</span>
-      <span class="kbd">⌘Z</span><span>Undo (⇧⌘Z redo)</span>
-      <span class="kbd">⌘ + scroll</span><span>Zoom timeline</span>
+      <span class="kbd">${MOD}Z</span><span>Undo (⇧${MOD}Z redo)</span>
+      <span class="kbd">${MOD} + scroll</span><span>Zoom timeline</span>
       <span class="kbd">+ / −</span><span>Zoom in / out</span>
     </div>
     <p class="note" style="margin-top:14px">Select a clip to set volume, scale and position (e.g. picture-in-picture on an overlay track). Select a caption to edit its text and style.</p>`;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TinyCutOpus
+GenericName=Video Editor
+Comment=Cut videos and add auto-generated subtitles
+Exec=TinyCutOpus %F
+Icon=tinycutopus
+Categories=AudioVideo;Video;AudioVideoEditing;
+Terminal=false

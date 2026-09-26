@@ -8,5 +8,5 @@ if [ ! -x .venv/bin/python ]; then
   .venv/bin/pip install -q -r requirements.txt
 fi
 PORT="${PORT:-8747}"
-( sleep 1.5 && open "http://localhost:$PORT" ) >/dev/null 2>&1 &
+( sleep 1.5 && .venv/bin/python -m webbrowser "http://localhost:$PORT" ) >/dev/null 2>&1 &
 exec .venv/bin/uvicorn server:app --host 127.0.0.1 --port "$PORT"

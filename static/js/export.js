@@ -1,8 +1,8 @@
 // Export: render caption frames with the preview renderer, then let ffmpeg composite everything.
 import { state, projectDuration } from './store.js';
 import { drawCaptions, captionKeyTimes, loadFonts } from './captions.js';
-import { pause } from './preview.js';
-import { modal, closeModal, esc, fmtTime } from './util.js';
+import { pause, canPlayH264 } from './preview.js';
+import { modal, closeModal, esc, fmtTime, native } from './util.js';
 
 const toBlob = canvas => new Promise(r => canvas.toBlob(r, 'image/png'));
 
@@ -77,13 +77,20 @@ export async function exportVideo() {
       setBar(0.3 + 0.7 * s.progress);
       stage.textContent = `Rendering video… ${Math.round(s.progress * 100)}%`;
       if (s.status === 'done') {
+        const app = native();
         card.innerHTML = `
           <h3>✅ Export ready</h3>
-          <video src="${s.url}" controls autoplay muted></video>
-          <div class="dim small">Saved to data/exports/${esc(s.file)}</div>
+          ${canPlayH264 ? `<video src="${s.url}" controls autoplay muted></video>` : ''}
+          <div class="dim small">Saved to ${esc(s.folder)}/${esc(s.file)}</div>
           <div class="btn-row" style="justify-content:flex-end;margin-top:14px">
-            <button id="xClose">Close</button><a href="${s.url}" download><button class="primary">Download MP4</button></a></div>`;
+            <button id="xClose">Close</button>
+            ${app ? `<button id="xReveal">${/Mac/.test(navigator.platform) ? 'Show in Finder' : 'Show in folder'}</button>` + '<button id="xSave" class="primary">Save a copy…</button>'
+                  : `<a href="${s.url}" download><button class="primary">Download MP4</button></a>`}</div>`;
         card.querySelector('#xClose').onclick = closeModal;
+        if (app) {
+          card.querySelector('#xReveal').onclick = () => app.reveal_export(s.file);
+          card.querySelector('#xSave').onclick = () => app.save_export(s.file);
+        }
         return;
       }
     }

@@ -1,4 +1,6 @@
 export const $ = (s, r = document) => r.querySelector(s);
+/** Native helpers when running inside the desktop app (pywebview), else null. */
+export const native = () => window.pywebview?.api || null;
 export const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 export const uid = () => Math.random().toString(36).slice(2, 10);
 export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));

@@ -1,4 +1,36 @@
-.venv/
+# Your own projects, media, exports and downloaded speech models (dev mode keeps them in ./data)
 data/
-__pycache__/
 models/
+*.bin
+
+# Build outputs and downloaded ffmpeg / whisper.cpp binaries (desktop/build.py)
+build/
+dist/
+vendor/
+*.dmg
+*.AppImage
+
+# Python
+.venv/
+.venv-build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Scratch output (e.g. thumbnails) and temp files
+output/
+*.log
+*.tmp
+*.part
+
+# Secrets
+.env
+.env.*
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
